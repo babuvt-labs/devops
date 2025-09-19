@@ -1,0 +1,100 @@
+# Starter pipeline
+# Start with a minimal pipeline that you can customize to build and deploy your code.
+# Add steps that build, run tests, deploy, and more:
+# https://aka.ms/yaml
+
+trigger:
+- none
+
+pool:
+  name: usecase1-win-agent
+
+
+variables:
+  bkstrgrg: 'rg-dev'
+  bkstrg: 'cirazadopstest1'
+  bkcontainer: 'tfstate'
+  bkstrgkey: 'devpipeline.terraform.tfstate'
+
+stages:
+  - stage: tfvalidate
+    jobs:
+      - job: validate
+        continueOnError: false
+        steps:
+          - task: TerraformInstaller@1
+            displayName: tfinstall
+            inputs:
+              terraformVersion: 'latest'
+          - task: TerraformTask@5
+            displayName: init
+            env:
+              ARM_USE_AZURECLI_AUTH: false
+              ARM_USE_MSI: false
+              TF_IN_AUTOMATION: true
+            inputs:
+              provider: 'azurerm'
+              command: 'init'
+              workingDirectory: '$(System.DefaultWorkingDirectory)'
+              backendServiceArm: 'contoso-dev'
+              backendAzureRmResourceGroupName: '$(bkstrgrg)'
+              backendAzureRmStorageAccountName: '$(bkstrg)'
+              backendAzureRmContainerName: '$(bkcontainer)'
+              backendAzureRmKey: '$(bkstrgkey)'
+          - task: TerraformTask@5
+            displayName: validate
+            env:
+              ARM_USE_AZURECLI_AUTH: false
+              ARM_USE_MSI: false
+              TF_IN_AUTOMATION: true
+            inputs:
+              provider: 'azurerm'
+              command: 'validate'
+              workingDirectory: '$(System.DefaultWorkingDirectory)'
+  - stage: tfdeploy
+    condition: succeeded('tfvalidate')             
+    dependsOn: tfvalidate
+    jobs:
+      - job: apply
+        steps:
+          - task: TerraformInstaller@1
+            displayName: tfinstall
+            inputs:
+              terraformVersion: 'latest'
+          - task: TerraformTask@5
+            displayName: init
+            env:
+              ARM_USE_AZURECLI_AUTH: false
+              ARM_USE_MSI: false
+              TF_IN_AUTOMATION: true
+            inputs:
+              provider: 'azurerm'
+              command: 'init'
+              workingDirectory: '$(System.DefaultWorkingDirectory)'
+              backendServiceArm: 'contoso-dev'
+              backendAzureRmResourceGroupName: '$(bkstrgrg)'
+              backendAzureRmStorageAccountName: '$(bkstrg)'
+              backendAzureRmContainerName: '$(bkcontainer)'
+              backendAzureRmKey: '$(bkstrgkey)'
+          - task: TerraformTask@5
+            displayName: plan
+            env:
+              ARM_USE_AZURECLI_AUTH: false
+              ARM_USE_MSI: false
+              TF_IN_AUTOMATION: true
+            inputs:
+              provider: 'azurerm'
+              command: 'plan'
+              workingDirectory: '$(System.DefaultWorkingDirectory)'
+              environmentServiceNameAzureRM: 'contoso-dev'
+          - task: TerraformTask@5
+            displayName: apply
+            env:
+              ARM_USE_AZURECLI_AUTH: false
+              ARM_USE_MSI: false
+              TF_IN_AUTOMATION: true
+            inputs:
+              provider: 'azurerm'
+              command: 'apply'
+              workingDirectory: '$(System.DefaultWorkingDirectory)'
+              environmentServiceNameAzureRM: 'contoso-dev'

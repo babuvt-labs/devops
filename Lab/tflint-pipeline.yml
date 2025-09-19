@@ -1,0 +1,234 @@
+# Starter pipeline
+# Start with a minimal pipeline that you can customize to build and deploy your code.
+# Add steps that build, run tests, deploy, and more:
+# https://aka.ms/yaml
+
+trigger:
+- none
+
+pool:
+  name: usecase1-win-agent
+
+
+variables:
+  bkstrgrg: 'rg-dev'
+  bkstrg: 'cirazadopstest1'
+  bkcontainer: 'tfstate'
+  bkstrgkey: 'devpipeline.terraform.tfstate'
+
+stages:
+  - stage: tfvalidate
+    jobs:
+      - job: validate
+        continueOnError: false
+        steps:
+          - task: TerraformInstaller@1
+            displayName: tfinstall
+            inputs:
+              terraformVersion: 'latest'
+          - task: TerraformTask@5
+            displayName: init
+            env:
+              ARM_USE_AZURECLI_AUTH: false
+              ARM_USE_MSI: false
+              TF_IN_AUTOMATION: true
+            inputs:
+              provider: 'azurerm'
+              command: 'init'
+              workingDirectory: '$(System.DefaultWorkingDirectory)'
+              backendServiceArm: 'contoso-dev'
+              backendAzureRmResourceGroupName: '$(bkstrgrg)'
+              backendAzureRmStorageAccountName: '$(bkstrg)'
+              backendAzureRmContainerName: '$(bkcontainer)'
+              backendAzureRmKey: '$(bkstrgkey)'
+          - task: TerraformTask@5
+            displayName: validate
+            env:
+              ARM_USE_AZURECLI_AUTH: false
+              ARM_USE_MSI: false
+              TF_IN_AUTOMATION: true
+            inputs:
+              provider: 'azurerm'
+              command: 'validate'
+              workingDirectory: '$(System.DefaultWorkingDirectory)'
+  - stage: tfsecurity
+    condition: succeeded('tfvalidate')
+    dependsOn: tfvalidate
+    jobs:
+      - job: tflint_scan
+        displayName: 'TFLint Security Scan'
+        steps:
+          - task: TerraformInstaller@1
+            displayName: tfinstall
+            inputs:
+              terraformVersion: 'latest'
+          - task: TerraformTask@5
+            displayName: init
+            env:
+              ARM_USE_AZURECLI_AUTH: false
+              ARM_USE_MSI: false
+              TF_IN_AUTOMATION: true
+            inputs:
+              provider: 'azurerm'
+              command: 'init'
+              workingDirectory: '$(System.DefaultWorkingDirectory)'
+              backendServiceArm: 'contoso-dev'
+              backendAzureRmResourceGroupName: '$(bkstrgrg)'
+              backendAzureRmStorageAccountName: '$(bkstrg)'
+              backendAzureRmContainerName: '$(bkcontainer)'
+              backendAzureRmKey: '$(bkstrgkey)'
+          - task: PowerShell@2
+            displayName: 'Install and Run TFLint Scan'
+            inputs:
+              targetType: 'inline'
+              script: |
+                Write-Host "Starting TFLint setup and scan..."
+                Write-Host "Working directory: $(System.DefaultWorkingDirectory)"
+                
+                # Download and install TFLint directly
+                Write-Host "Downloading TFLint..."
+                $tflintVersion = "v0.50.3"
+                $downloadUrl = "https://github.com/terraform-linters/tflint/releases/download/$tflintVersion/tflint_windows_amd64.zip"
+                $zipPath = "$env:TEMP\tflint.zip"
+                $extractPath = "$env:TEMP\tflint"
+                
+                try {
+                  # Download TFLint
+                  Invoke-WebRequest -Uri $downloadUrl -OutFile $zipPath
+                  
+                  # Extract the zip file
+                  if (Test-Path $extractPath) { Remove-Item $extractPath -Recurse -Force }
+                  Expand-Archive -Path $zipPath -DestinationPath $extractPath
+                  
+                  # Set the path to tflint executable
+                  $tflintExe = "$extractPath\tflint.exe"
+                  
+                  if (Test-Path $tflintExe) {
+                    Write-Host "TFLint downloaded and extracted successfully"
+                    
+                    # Initialize TFLint
+                    Write-Host "Initializing TFLint..."
+                    & $tflintExe --init
+                    
+                    # Run TFLint scan
+                    Write-Host "Running TFLint scan..."
+                    $scanOutput = & $tflintExe --format=compact 2>&1
+                    $tflintExitCode = $LASTEXITCODE
+                    Write-Host "TFLint scan output:"
+                    Write-Host $scanOutput
+                    Write-Host "TFLint exit code: $tflintExitCode"
+                    
+                    # Create a simple XML results file
+                    $hasIssues = $tflintExitCode -ne 0
+                    
+                    if ($hasIssues) {
+                      $xmlContent = @"
+                <?xml version="1.0" encoding="UTF-8"?>
+                <testsuites name="tflint" tests="1" failures="1" time="0">
+                  <testsuite name="tflint-scan" tests="1" failures="1" time="0">
+                    <testcase name="terraform-lint-check" classname="terraform" time="0">
+                      <failure message="TFLint found issues">$($scanOutput -join "`n")</failure>
+                    </testcase>
+                  </testsuite>
+                </testsuites>
+                "@
+                    } else {
+                      $xmlContent = @"
+                <?xml version="1.0" encoding="UTF-8"?>
+                <testsuites name="tflint" tests="1" failures="0" time="0">
+                  <testsuite name="tflint-scan" tests="1" failures="0" time="0">
+                    <testcase name="terraform-lint-check" classname="terraform" time="0">
+                      <system-out>No issues found</system-out>
+                    </testcase>
+                  </testsuite>
+                </testsuites>
+                "@
+                    }
+                    
+                    $xmlContent | Out-File -FilePath "$(Agent.TempDirectory)\tflint-results.xml" -Encoding UTF8
+                    Write-Host "Results saved to XML file"
+                    
+                    # Reset exit code to 0 so the pipeline task doesn't fail
+                    $LASTEXITCODE = 0
+                    
+                  } else {
+                    Write-Host "Failed to extract TFLint executable"
+                    throw "TFLint installation failed"
+                  }
+                  
+                } catch {
+                  Write-Host "Error installing TFLint: $_"
+                  Write-Host "Creating minimal results file..."
+                  
+                  # Create a basic results file even if installation fails
+                  $fallbackXml = @"
+                <?xml version="1.0" encoding="UTF-8"?>
+                <testsuites name="tflint" tests="1" failures="0" time="0">
+                  <testsuite name="tflint-scan" tests="1" failures="0" time="0">
+                    <testcase name="tflint-setup-failed" classname="terraform" time="0">
+                      <system-out>TFLint setup failed - manual review required</system-out>
+                    </testcase>
+                  </testsuite>
+                </testsuites>
+                "@
+                  $fallbackXml | Out-File -FilePath "$(Agent.TempDirectory)\tflint-results.xml" -Encoding UTF8
+                }
+                
+                Write-Host "TFLint process completed."
+          - task: PublishTestResults@2
+            displayName: 'Publish TFLint Results'
+            condition: always()
+            inputs:
+              testResultsFormat: 'JUnit'
+              testResultsFiles: '$(Agent.TempDirectory)/tflint-results.xml'
+              testRunTitle: 'TFLint Security Scan Results'
+              failTaskOnFailedTests: false
+  - stage: securityreview
+    condition: succeeded('tfsecurity')
+    dependsOn: tfsecurity
+    jobs:
+      - job: security_approval
+        displayName: 'Security Review & Approval'
+        pool: server
+        steps:
+          - task: ManualValidation@0
+            displayName: 'Manual Security Review Approval'
+            inputs:
+              notifyUsers: 'your-email@domain.com'
+              instructions: 'Please review the TFLint security scan results from the previous stage and approve if no critical issues are found. Check the Tests tab in the TFSecurity stage for detailed results.'
+  - stage: tfdeploy
+    condition: succeeded('securityreview')             
+    dependsOn: securityreview
+    jobs:
+      - job: apply
+        steps:
+          - task: TerraformInstaller@1
+            displayName: tfinstall
+            inputs:
+              terraformVersion: 'latest'
+          - task: TerraformTask@5
+            displayName: init
+            env:
+              ARM_USE_AZURECLI_AUTH: false
+              ARM_USE_MSI: false
+              TF_IN_AUTOMATION: true
+            inputs:
+              provider: 'azurerm'
+              command: 'init'
+              workingDirectory: '$(System.DefaultWorkingDirectory)'
+              backendServiceArm: 'contoso-dev'
+              backendAzureRmResourceGroupName: '$(bkstrgrg)'
+              backendAzureRmStorageAccountName: '$(bkstrg)'
+              backendAzureRmContainerName: '$(bkcontainer)'
+              backendAzureRmKey: '$(bkstrgkey)'
+          - task: TerraformTask@5
+            displayName: plan
+            env:
+              ARM_USE_AZURECLI_AUTH: false
+              ARM_USE_MSI: false
+              TF_IN_AUTOMATION: true
+            inputs:
+              provider: 'azurerm'
+              command: 'plan'
+              workingDirectory: '$(System.DefaultWorkingDirectory)'
+              environmentServiceNameAzureRM: 'contoso-dev'

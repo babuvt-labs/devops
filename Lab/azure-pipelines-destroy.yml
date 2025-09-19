@@ -1,0 +1,212 @@
+# Terraform Destroy Pipeline
+# Pipeline to destroy/remove all resources created by Terraform
+# WARNING: This will permanently delete all resources defined in the Terraform configuration
+
+trigger:
+- none
+
+pool:
+  name: usecase1-win-agent
+
+variables:
+  bkstrgrg: 'rg-dev'
+  bkstrg: 'cirazadopstest1'
+  bkcontainer: 'tfstate'
+  bkstrgkey: 'devpipeline.terraform.tfstate'
+
+stages:
+  - stage: tfvalidate
+    displayName: 'Terraform Validation'
+    jobs:
+      - job: validate
+        displayName: 'Validate Terraform Configuration'
+        continueOnError: false
+        steps:
+          - task: TerraformInstaller@1
+            displayName: 'Install Terraform'
+            inputs:
+              terraformVersion: 'latest'
+          - task: TerraformTask@5
+            displayName: 'Terraform Init'
+            env:
+              ARM_USE_AZURECLI_AUTH: false
+              ARM_USE_MSI: false
+              TF_IN_AUTOMATION: true
+            inputs:
+              provider: 'azurerm'
+              command: 'init'
+              workingDirectory: '$(System.DefaultWorkingDirectory)'
+              backendServiceArm: 'contoso-dev'
+              backendAzureRmResourceGroupName: '$(bkstrgrg)'
+              backendAzureRmStorageAccountName: '$(bkstrg)'
+              backendAzureRmContainerName: '$(bkcontainer)'
+              backendAzureRmKey: '$(bkstrgkey)'
+          - task: TerraformTask@5
+            displayName: 'Terraform Validate'
+            env:
+              ARM_USE_AZURECLI_AUTH: false
+              ARM_USE_MSI: false
+              TF_IN_AUTOMATION: true
+            inputs:
+              provider: 'azurerm'
+              command: 'validate'
+              workingDirectory: '$(System.DefaultWorkingDirectory)'
+              
+  - stage: tfplan_destroy
+    displayName: 'Terraform Plan Destroy'
+    condition: succeeded('tfvalidate')
+    dependsOn: tfvalidate
+    jobs:
+      - job: inspect_state
+        displayName: 'Inspect Current State'
+        steps:
+          - task: TerraformInstaller@1
+            displayName: 'Install Terraform'
+            inputs:
+              terraformVersion: 'latest'
+          - task: TerraformTask@5
+            displayName: 'Terraform Init'
+            env:
+              ARM_USE_AZURECLI_AUTH: false
+              ARM_USE_MSI: false
+              TF_IN_AUTOMATION: true
+            inputs:
+              provider: 'azurerm'
+              command: 'init'
+              workingDirectory: '$(System.DefaultWorkingDirectory)'
+              backendServiceArm: 'contoso-dev'
+              backendAzureRmResourceGroupName: '$(bkstrgrg)'
+              backendAzureRmStorageAccountName: '$(bkstrg)'
+              backendAzureRmContainerName: '$(bkcontainer)'
+              backendAzureRmKey: '$(bkstrgkey)'
+          - task: TerraformTask@5
+            displayName: 'List Resources in State'
+            env:
+              ARM_USE_AZURECLI_AUTH: false
+              ARM_USE_MSI: false
+              TF_IN_AUTOMATION: true
+            inputs:
+              provider: 'azurerm'
+              command: 'custom'
+              customCommand: 'state'
+              commandOptions: 'list'
+              workingDirectory: '$(System.DefaultWorkingDirectory)'
+              environmentServiceNameAzureRM: 'contoso-dev'
+          - task: TerraformTask@5
+            displayName: 'Show Current State'
+            env:
+              ARM_USE_AZURECLI_AUTH: false
+              ARM_USE_MSI: false
+              TF_IN_AUTOMATION: true
+            inputs:
+              provider: 'azurerm'
+              command: 'show'
+              workingDirectory: '$(System.DefaultWorkingDirectory)'
+              environmentServiceNameAzureRM: 'contoso-dev'
+      - job: plan_destroy
+        displayName: 'Plan Destroy Operation'
+        dependsOn: inspect_state
+        steps:
+          - task: TerraformInstaller@1
+            displayName: 'Install Terraform'
+            inputs:
+              terraformVersion: 'latest'
+          - task: TerraformTask@5
+            displayName: 'Terraform Init'
+            env:
+              ARM_USE_AZURECLI_AUTH: false
+              ARM_USE_MSI: false
+              TF_IN_AUTOMATION: true
+            inputs:
+              provider: 'azurerm'
+              command: 'init'
+              workingDirectory: '$(System.DefaultWorkingDirectory)'
+              backendServiceArm: 'contoso-dev'
+              backendAzureRmResourceGroupName: '$(bkstrgrg)'
+              backendAzureRmStorageAccountName: '$(bkstrg)'
+              backendAzureRmContainerName: '$(bkcontainer)'
+              backendAzureRmKey: '$(bkstrgkey)'
+          - task: TerraformTask@5
+            displayName: 'Terraform Plan Destroy'
+            env:
+              ARM_USE_AZURECLI_AUTH: false
+              ARM_USE_MSI: false
+              TF_IN_AUTOMATION: true
+            inputs:
+              provider: 'azurerm'
+              command: 'plan'
+              commandOptions: '-destroy'
+              workingDirectory: '$(System.DefaultWorkingDirectory)'
+              environmentServiceNameAzureRM: 'contoso-dev'
+
+  - stage: tfapproval
+    displayName: 'Manual Approval for Destruction'
+    condition: succeeded('tfplan_destroy')
+    dependsOn: tfplan_destroy
+    jobs:
+      - job: waitForValidation
+        displayName: 'Wait for Manual Approval'
+        pool: server
+        timeoutInMinutes: 60 # 1 hour timeout for approval
+        steps:
+        - task: ManualValidation@0
+          displayName: 'Approve Resource Destruction'
+          inputs:
+            notifyUsers: |
+              $(Build.RequestedForEmail)
+            instructions: 'Please review the destroy plan and approve if you want to proceed with deleting all Terraform-managed resources. This action cannot be undone!'
+            onTimeout: 'reject'
+
+  - stage: tfdestroy
+    displayName: 'Terraform Destroy'
+    condition: succeeded('tfapproval')
+    dependsOn: tfapproval
+    jobs:
+      - job: destroy
+        displayName: 'Destroy Resources'
+        steps:
+          - task: TerraformInstaller@1
+            displayName: 'Install Terraform'
+            inputs:
+              terraformVersion: 'latest'
+          - task: TerraformTask@5
+            displayName: 'Terraform Init'
+            env:
+              ARM_USE_AZURECLI_AUTH: false
+              ARM_USE_MSI: false
+              TF_IN_AUTOMATION: true
+            inputs:
+              provider: 'azurerm'
+              command: 'init'
+              workingDirectory: '$(System.DefaultWorkingDirectory)'
+              backendServiceArm: 'contoso-dev'
+              backendAzureRmResourceGroupName: '$(bkstrgrg)'
+              backendAzureRmStorageAccountName: '$(bkstrg)'
+              backendAzureRmContainerName: '$(bkcontainer)'
+              backendAzureRmKey: '$(bkstrgkey)'
+          - task: TerraformTask@5
+            displayName: 'Terraform Destroy'
+            env:
+              ARM_USE_AZURECLI_AUTH: false
+              ARM_USE_MSI: false
+              TF_IN_AUTOMATION: true
+            inputs:
+              provider: 'azurerm'
+              command: 'destroy'
+              commandOptions: '-auto-approve'
+              workingDirectory: '$(System.DefaultWorkingDirectory)'
+              environmentServiceNameAzureRM: 'contoso-dev'
+          - task: TerraformTask@5
+            displayName: 'Verify State After Destroy'
+            env:
+              ARM_USE_AZURECLI_AUTH: false
+              ARM_USE_MSI: false
+              TF_IN_AUTOMATION: true
+            inputs:
+              provider: 'azurerm'
+              command: 'custom'
+              customCommand: 'state'
+              commandOptions: 'list'
+              workingDirectory: '$(System.DefaultWorkingDirectory)'
+              environmentServiceNameAzureRM: 'contoso-dev'
+            continueOnError: true

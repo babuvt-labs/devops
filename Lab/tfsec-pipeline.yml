@@ -1,0 +1,151 @@
+trigger: none
+
+pool:
+  name: 'usecase1-win-agent'
+
+variables:
+  terraformDirectory: '$(System.DefaultWorkingDirectory)'
+
+stages:
+- stage: SecurityScan
+  displayName: 'Terraform Security Scan'
+  jobs:
+  - job: TfsecScan
+    displayName: 'Run tfsec Security Scan'
+    steps:
+    - checkout: self
+      displayName: 'Checkout source code'
+    
+    - task: PowerShell@2
+      displayName: 'Run tfsec scan'
+      inputs:
+        targetType: 'inline'
+        script: |
+          Write-Host "Starting tfsec security scan..."
+          
+          # Navigate to terraform directory
+          Set-Location "$(terraformDirectory)"
+          Write-Host "Current directory: $(Get-Location)"
+          
+          # Check for Terraform files
+          Write-Host "Looking for Terraform files..."
+          $tfFiles = Get-ChildItem -Path . -Filter "*.tf" -Recurse
+          if ($tfFiles.Count -eq 0) {
+            Write-Host "⚠️ No .tf files found in current directory"
+            Get-ChildItem -Path . -Recurse | Select-Object Name, FullName | Format-Table
+          } else {
+            Write-Host "Found $($tfFiles.Count) Terraform files:"
+            $tfFiles | ForEach-Object { Write-Host "  - $($_.FullName)" }
+          }
+          
+          # Check tfsec version
+          Write-Host "Checking tfsec version..."
+          tfsec --version
+          
+          # Run tfsec scan with verbose output
+          Write-Host "Running tfsec scan on Terraform files..."
+          Write-Host "Command: tfsec . --verbose"
+          tfsec . --verbose
+          
+          # Generate output files
+          Write-Host "Generating output files..."
+          tfsec . --format json --out tfsec-results.json --verbose
+          tfsec . --format junit --out tfsec-junit.xml --verbose
+          
+          # Check if output files were created
+          if (Test-Path "tfsec-results.json") {
+            $jsonSize = (Get-Item "tfsec-results.json").Length
+            Write-Host "tfsec-results.json created (size: $jsonSize bytes)"
+          } else {
+            Write-Host "❌ tfsec-results.json was not created"
+          }
+          
+          if (Test-Path "tfsec-junit.xml") {
+            $xmlSize = (Get-Item "tfsec-junit.xml").Length
+            Write-Host "tfsec-junit.xml created (size: $xmlSize bytes)"
+          } else {
+            Write-Host "❌ tfsec-junit.xml was not created"
+          }
+          
+          # Check exit code
+          $exitCode = $LASTEXITCODE
+          Write-Host "Tfsec exit code: $exitCode"
+          
+          if ($exitCode -eq 0) {
+            Write-Host "✅ No security issues found!"
+          } else {
+            Write-Host "❌ Security issues detected or scan error occurred."
+            exit $exitCode
+          }
+        failOnStderr: false
+    
+    - task: PublishTestResults@2
+      displayName: 'Publish tfsec test results'
+      condition: always()
+      inputs:
+        testResultsFormat: 'JUnit'
+        testResultsFiles: 'tfsec-junit.xml'
+        testRunTitle: 'Tfsec Security Scan Results'
+        failTaskOnFailedTests: true
+    
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publish tfsec results'
+      condition: always()
+      inputs:
+        pathToPublish: 'tfsec-results.json'
+        artifactName: 'tfsec-security-results'
+        publishLocation: 'Container'
+
+- stage: ManualApproval
+  displayName: 'Security Review & Approval'
+  dependsOn: SecurityScan
+  condition: succeeded()
+  jobs:
+  - job: waitForValidation
+    displayName: 'Wait for Security Review'
+    pool: server
+    timeoutInMinutes: 1440 # 24 hours timeout
+    steps:
+    - task: ManualValidation@0
+      displayName: 'Review Security Scan Results'
+      inputs:
+        notifyUsers: ''
+        instructions: |
+          Please review the security scan results before proceeding to deployment:
+          
+          📋 Review Steps:
+          1. Check the tfsec security scan results in the previous stage
+          2. Download and review the 'tfsec-security-results' artifact
+          3. Verify all security issues have been addressed or accepted
+          4. Ensure the infrastructure meets security requirements
+          
+          ⚠️  Only approve if you accept the security risks identified in the scan.
+          
+          Click "Resume" to approve deployment or "Reject" to stop the pipeline.
+
+- stage: Deploy
+  displayName: 'Deploy Stage'
+  dependsOn: ManualApproval
+  condition: succeeded()
+  jobs:
+  - job: DeployJob
+    displayName: 'Deploy to Environment'
+    steps:
+    - checkout: self
+      displayName: 'Checkout source code'
+    
+    - task: PowerShell@2
+      displayName: 'Deploy application'
+      inputs:
+        targetType: 'inline'
+        script: |
+          Write-Host "🚀 Starting deployment process..."
+          Write-Host "Deploying infrastructure with Terraform..."
+          Write-Host "terraform init..."
+          Start-Sleep -Seconds 3
+          Write-Host "terraform plan..."
+          Start-Sleep -Seconds 5
+          Write-Host "terraform apply..."
+          Start-Sleep -Seconds 10
+          Write-Host "✅ Deployment completed successfully!"
+        failOnStderr: false

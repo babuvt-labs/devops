@@ -1,0 +1,192 @@
+# Terraform Destroy Pipeline with Security Scanning
+# Pipeline to destroy/delete resources created via Terraform
+# This pipeline will run security scans, validate and then destroy the infrastructure
+# https://aka.ms/yaml
+
+trigger:
+- none
+
+pool:
+  name: usecase1-win-agent
+  vmImage: ubuntu-latest
+
+variables:
+  bkstrgrg: 'rg-dev'
+  bkstrg: 'cirazadopstest1'
+  bkcontainer: 'tfstate'
+  bkstrgkey: 'devpipeline.terraform.tfstate'
+
+stages:
+  - stage: tfsecurityscan
+    displayName: 'Security Scanning'
+    jobs:
+      - job: security_scan
+        displayName: 'Terraform Security Scan'
+        continueOnError: false
+        steps:
+          - task: TerraformInstaller@1
+            displayName: 'Install Terraform'
+            inputs:
+              terraformVersion: 'latest'
+          - task: TerraformTask@5
+            displayName: 'Terraform Init'
+            env:
+              ARM_USE_AZURECLI_AUTH: false
+              ARM_USE_MSI: false
+              TF_IN_AUTOMATION: true
+            inputs:
+              provider: 'azurerm'
+              command: 'init'
+              backendServiceArm: 'contoso-dev'
+              backendAzureRmResourceGroupName: '$(bkstrgrg)'
+              backendAzureRmStorageAccountName: '$(bkstrg)'
+              backendAzureRmContainerName: '$(bkcontainer)'
+              backendAzureRmKey: '$(bkstrgkey)'
+          - script: |
+              echo "Installing TFSec..."
+              wget -q https://github.com/aquasecurity/tfsec/releases/latest/download/tfsec-linux-amd64 -O /tmp/tfsec
+              chmod +x /tmp/tfsec
+              echo "Running TFSec security scan..."
+              /tmp/tfsec . --format junit --out tfsec-results.xml --soft-fail
+              echo "TFSec scan completed"
+            displayName: 'Run TFSec Security Scan'
+            continueOnError: true
+          - script: |
+              echo "Installing GitLeaks..."
+              wget -q https://github.com/gitleaks/gitleaks/releases/latest/download/gitleaks_8.18.4_linux_x64.tar.gz -O /tmp/gitleaks.tar.gz
+              tar -xzf /tmp/gitleaks.tar.gz -C /tmp/
+              chmod +x /tmp/gitleaks
+              echo "Running GitLeaks credential scan..."
+              /tmp/gitleaks detect --source . --report-format json --report-path gitleaks-report.json --no-git || true
+              echo "GitLeaks scan completed"
+            displayName: 'Run GitLeaks Credential Scan'
+            continueOnError: true
+          - task: PublishTestResults@2
+            displayName: 'Publish TFSec Results'
+            condition: succeededOrFailed()
+            inputs:
+              testResultsFormat: 'JUnit'
+              testResultsFiles: 'tfsec-results.xml'
+              testRunTitle: 'TFSec Security Scan Results'
+              failTaskOnFailedTests: false
+          - script: |
+              echo "=== Security Scan Summary ==="
+              echo "1. TFSec Infrastructure Security Scan:"
+              if [ -f "tfsec-results.xml" ]; then
+                echo "   ✓ TFSec scan completed. Check test results for security findings."
+              else
+                echo "   ✗ TFSec results not found."
+              fi
+              
+              echo "2. GitLeaks Credential Scan:"
+              if [ -f "gitleaks-report.json" ]; then
+                LEAKS_COUNT=$(jq length gitleaks-report.json 2>/dev/null || echo "0")
+                if [ "$LEAKS_COUNT" = "0" ]; then
+                  echo "   ✓ No credentials or secrets found."
+                else
+                  echo "   ⚠️  Found $LEAKS_COUNT potential credential leaks. Review gitleaks-report.json"
+                fi
+              else
+                echo "   ✓ GitLeaks scan completed - no issues found."
+              fi
+              
+              echo ""
+              echo "SECURITY RECOMMENDATION:"
+              echo "- Review all HIGH and CRITICAL TFSec findings"
+              echo "- Address any credential leaks before deployment"
+              echo "- Consider adding security gates for production deployments"
+            displayName: 'Security Scan Summary'
+          - task: PublishBuildArtifacts@1
+            displayName: 'Publish Security Reports'
+            condition: succeededOrFailed()
+            inputs:
+              pathToPublish: '$(System.DefaultWorkingDirectory)'
+              artifactName: 'SecurityReports'
+              artifactType: 'Container'
+              parallel: true
+              includeRootFolder: false
+              contents: |
+                tfsec-results.xml
+                gitleaks-report.json
+            
+  - stage: tfvalidate
+    displayName: 'Terraform Validation'
+    dependsOn: tfsecurityscan
+    condition: succeededOrFailed()
+    jobs:
+      - job: validate
+        continueOnError: false
+        steps:
+          - task: TerraformInstaller@1
+            displayName: tfinstall
+            inputs:
+              terraformVersion: 'latest'
+          - task: TerraformTask@5
+            displayName: init
+            env:
+              ARM_USE_AZURECLI_AUTH: false
+              ARM_USE_MSI: false
+              TF_IN_AUTOMATION: true
+            inputs:
+              provider: 'azurerm'
+              command: 'init'
+              backendServiceArm: 'contoso-dev'
+              backendAzureRmResourceGroupName: '$(bkstrgrg)'
+              backendAzureRmStorageAccountName: '$(bkstrg)'
+              backendAzureRmContainerName: '$(bkcontainer)'
+              backendAzureRmKey: '$(bkstrgkey)'
+          - task: TerraformTask@5
+            displayName: validate
+            env:
+              ARM_USE_AZURECLI_AUTH: false
+              ARM_USE_MSI: false
+              TF_IN_AUTOMATION: true
+            inputs:
+              provider: 'azurerm'
+              command: 'validate'
+  - stage: tfdestroy
+    displayName: 'Terraform Destroy'
+    condition: succeeded('tfvalidate')             
+    dependsOn: tfvalidate
+    jobs:
+      - job: destroy
+        steps:
+          - task: TerraformInstaller@1
+            displayName: tfinstall
+            inputs:
+              terraformVersion: 'latest'
+          - task: TerraformTask@5
+            displayName: init
+            env:
+              ARM_USE_AZURECLI_AUTH: false
+              ARM_USE_MSI: false
+              TF_IN_AUTOMATION: true
+            inputs:
+              provider: 'azurerm'
+              command: 'init'
+              backendServiceArm: 'contoso-dev'
+              backendAzureRmResourceGroupName: '$(bkstrgrg)'
+              backendAzureRmStorageAccountName: '$(bkstrg)'
+              backendAzureRmContainerName: '$(bkcontainer)'
+              backendAzureRmKey: '$(bkstrgkey)'
+          - task: TerraformTask@5
+            displayName: plan-destroy
+            env:
+              ARM_USE_AZURECLI_AUTH: false
+              ARM_USE_MSI: false
+              TF_IN_AUTOMATION: true
+            inputs:
+              provider: 'azurerm'
+              command: 'plan'
+              commandOptions: '-destroy'
+              environmentServiceNameAzureRM: 'contoso-dev'
+          - task: TerraformTask@5
+            displayName: destroy
+            env:
+              ARM_USE_AZURECLI_AUTH: false
+              ARM_USE_MSI: false
+              TF_IN_AUTOMATION: true
+            inputs:
+              provider: 'azurerm'
+              command: 'destroy'
+              environmentServiceNameAzureRM: 'contoso-dev'

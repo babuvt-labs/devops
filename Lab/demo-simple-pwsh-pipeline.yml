@@ -1,0 +1,56 @@
+trigger:
+- none
+
+pool:
+  name: usecase1-win-agent
+
+stages:
+- stage: Build
+  displayName: 'Build Stage'
+  jobs:
+  - job: BuildJob
+    displayName: 'Build Job'
+    steps:
+    - task: PowerShell@2
+      displayName: 'Build Script'
+      inputs:
+        targetType: 'inline'
+        script: |
+          Write-Host "Starting build process..."
+          Write-Host "Building application..."
+          Write-Host "Build completed successfully!"
+
+- stage: Approval
+  displayName: 'Manual Approval'
+  dependsOn: Build
+  jobs:
+  - job: waitForValidation
+    displayName: 'Wait for Manual Approval'
+    pool: server
+    timeoutInMinutes: 4320 # 3 days
+    steps:
+    - task: ManualValidation@0
+      displayName: 'Approve Deployment'
+      inputs:
+        notifyUsers: |
+          user@example.com
+        instructions: 'Please review the build results and approve deployment to production'
+        onTimeout: 'reject'
+
+- stage: Deploy
+  displayName: 'Deploy Stage'
+  dependsOn: Approval
+  # Deploy stage will run even if Build stage fails
+  #condition: always()
+  jobs:
+  - job: DeployJob
+    displayName: 'Deploy Job'
+    steps:
+    - task: PowerShell@2
+      displayName: 'Deploy Script'
+      inputs:
+        targetType: 'inline'
+        script: |
+          Write-Host "Starting deployment..."
+          Write-Host "Deploying to environment..."
+          Write-Host "Deployment completed successfully!"
